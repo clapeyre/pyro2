@@ -1,7 +1,8 @@
 """Benchmark identical float64 advection steps, including periodic ghost fills.
 
 Compilation, initialization, state resets, and validation are untimed.
-Core-mode transfers are untimed; driver-mode transfers are timed.
+Core/resident-mode transfers are untimed; driver-mode transfers are timed.
+Resident mode measures driver stepping with density kept on device.
 CUDA wall time includes Python submission and the final device synchronization.
 Driver mode also includes per-step uploads and downloads for host API compatibility.
 """
@@ -71,26 +72,29 @@ def benchmark_size(n, args):
     row = {"nx": n, "ny": n, "dt": dt, "upstream": summary(baseline_samples), "warp": {}}
 
     for device_name in args.devices:
-        if args.mode == "driver":
+        if args.mode in ("driver", "resident"):
             driver = Pyro("advection")
             driver.initialize_problem("smooth", inputs_dict={"mesh.nx": n, "mesh.ny": n,
                 "particles.do_particles": 0, "advection.limiter": args.limiter,
                 "advection.backend": "warp", "advection.warp_device": device_name,
+                "advection.warp_resident": int(args.mode == "resident"),
                 "io.force_final_output": 0})
             driver.sim.dt = dt
-            host_density = driver.sim.cc_data.get_var("density")
 
             def step(driver=driver):
                 driver.sim.cc_data.fill_BC_all()
                 driver.sim.evolve()
 
-            def reset(driver=driver, host_density=host_density):
-                host_density[:] = initial
+            def reset(driver=driver):
+                driver.sim.cc_data.get_var("density")[:] = initial
+                if args.mode == "resident":
+                    # Trial reset transfers are excluded, as in core mode.
+                    driver.sim.cc_data.begin_step(driver.sim.cc_data.backend)
                 driver.sim.cc_data.t = 0.0
                 driver.sim.n = 0
 
-            def result_array(host_density=host_density):
-                return host_density.v()
+            def result_array(driver=driver):
+                return driver.sim.cc_data.get_var("density").v()
         else:
             w = Advection(initial, nx=n, ny=n, dx=g.dx, dy=g.dy,
                                   limiter=args.limiter, device=device_name)
@@ -148,7 +152,8 @@ def markdown(report):
     args = report["workload"]
     lines = ["# Advection stepping benchmark", "",
         f"Mode: {args['mode']}. Driver mode includes host/device transfers and host ghost fills; "
-        "core mode keeps density device-resident.", "", f"Run: {report['started_at_utc']}.", "",
+        "core and resident modes keep density device-resident. "
+        "Resident mode includes the solver/host-mirror bookkeeping.", "", f"Run: {report['started_at_utc']}.", "",
         f"Float64, periodic smooth problem, limiter {args['limiter']}, CFL {args['cfl']}; "
         f"{args['warmup']} warmup steps, {args['steps']} timed steps per trial, {args['repeats']} trials.", "",
         f"CPU: {report['environment']['cpu_model']}. GPUs: " +
@@ -174,7 +179,7 @@ def markdown(report):
     lines += ["", f"All measured trials passed correctness checks; maximum absolute density difference: {error:.3g}.", "",
         "Raw trial timings, min/max spread, dependency versions, device information, workload "
         "parameters, and code hashes are in the companion JSON. This measures the current "
-        "stepping API; full simulation speedup requires a separate measurement after driver integration.", ""]
+        "stepping API; complete simulations also include startup, diagnostics, visualization, and I/O.", ""]
     return "\n".join(lines)
 
 
@@ -214,7 +219,7 @@ def plot(report, output):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=["core", "driver"], default="core")
+    parser.add_argument("--mode", choices=["core", "driver", "resident"], default="core")
     parser.add_argument("--sizes", type=int, nargs="+", default=[32, 64, 128, 256, 512, 1024])
     parser.add_argument("--devices", nargs="+", default=["cpu", "cuda:0"])
     parser.add_argument("--steps", type=int, default=50)
@@ -242,6 +247,7 @@ def main():
         "upstream_base": "adaf5c59b045664bfd46c68385100241b6196b16",
         "source_sha256": {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in (root / "pyro/advection/warp_backend.py", root / "pyro/advection/simulation.py",
+                      root / "pyro/advection/warp_data.py",
                       Path(__file__).resolve(), root / "tools/warp/requirements.lock")},
         "results": []}
     cwd = Path.cwd()
