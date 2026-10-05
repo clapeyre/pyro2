@@ -8,6 +8,8 @@ from pyro import Pyro
 
 
 @pytest.mark.parametrize("options,message", [
+    ({"advection.warp_resident": 2}, "warp_resident"),
+    ({"advection.warp_resident": 1}, "requires"),
     ({"advection.backend": "invalid"}, "advection.backend"),
     ({"advection.backend": "warp", "particles.do_particles": 1}, "particles"),
     ({"advection.backend": "warp", "mesh.xlboundary": "outflow"}, "periodic"),

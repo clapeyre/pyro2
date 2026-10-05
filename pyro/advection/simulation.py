@@ -3,6 +3,7 @@ import numpy as np
 
 import pyro.advection.advective_fluxes as flx
 from pyro.advection.interface import linear_interface
+from pyro.advection.warp_data import ResidentData
 from pyro.mesh import patch
 from pyro.particles import particles
 from pyro.simulation_null import NullSimulation, bc_setup, grid_setup
@@ -30,7 +31,8 @@ class Simulation(NullSimulation):
         my_grid = grid_setup(self.rp, ng=4)
 
         # create the variables
-        my_data = patch.CellCenterData2d(my_grid)
+        data_class = ResidentData if self._resident_enabled() else patch.CellCenterData2d
+        my_data = data_class(my_grid)
         bc = bc_setup(self.rp)[0]
         my_data.register_var("density", bc)
         my_data.create()
@@ -57,6 +59,17 @@ class Simulation(NullSimulation):
             raise ValueError("Warp is supported only by the advection solver")
         return backend
 
+    def _resident_enabled(self):
+        try:
+            resident = self.rp.get_param("advection.warp_resident")
+        except KeyError:
+            resident = 0
+        if resident not in (0, 1):
+            raise ValueError("advection.warp_resident must be 0 or 1")
+        if resident and self._backend_name() != "warp":
+            raise ValueError("advection.warp_resident requires advection.backend=warp")
+        return bool(resident)
+
     @staticmethod
     def _validate_warp_boundaries(boundaries):
         if any(b not in ("periodic", "outflow") for b in boundaries):
@@ -66,6 +79,11 @@ class Simulation(NullSimulation):
                 raise ValueError("periodic boundaries must be paired in each direction")
 
     def _advection_backend(self):
+        resident = self._resident_enabled()
+        if resident and not isinstance(self.cc_data, ResidentData):
+            self.cc_data = ResidentData.from_data(self.cc_data)
+        elif not resident and isinstance(self.cc_data, ResidentData) and self.cc_data.backend is not None:
+            self.cc_data.detach()
         if self._backend_name() == "numpy":
             return None
         if self.rp.get_param("particles.do_particles"):
@@ -85,7 +103,7 @@ class Simulation(NullSimulation):
         u = self.rp.get_param("advection.u")
         v = self.rp.get_param("advection.v")
         limiter = self.rp.get_param("advection.limiter")
-        key = (id(grid), grid.nx, grid.ny, grid.dx, grid.dy, u, v, limiter, device, boundaries)
+        key = (id(self.cc_data), id(grid), grid.nx, grid.ny, grid.dx, grid.dy, u, v, limiter, device, boundaries)
         cached = getattr(self, "_warp", None)
         if cached is None or getattr(self, "_warp_key", None) != key:
             try:
@@ -100,6 +118,8 @@ class Simulation(NullSimulation):
                 nx=grid.nx, ny=grid.ny, dx=grid.dx, dy=grid.dy,
                 u=u, v=v, limiter=limiter, device=device, boundaries=boundaries)
             self._warp_key = key
+        if resident:
+            self.cc_data.begin_step(self._warp)
         return self._warp
 
     def method_compute_timestep(self):
@@ -129,10 +149,14 @@ class Simulation(NullSimulation):
 
         warp_backend = self._advection_backend()
         if warp_backend is not None:
-            density = self.cc_data.get_var("density")
-            warp_backend.upload(density)
-            warp_backend.step(self.dt)
-            density[:, :] = warp_backend.numpy()
+            if self._resident_enabled():
+                warp_backend.step(self.dt)
+                self.cc_data.end_step()
+            else:
+                density = self.cc_data.get_var("density")
+                warp_backend.upload(density)
+                warp_backend.step(self.dt)
+                density[:, :] = warp_backend.numpy()
             self.cc_data.t += self.dt
             self.n += 1
             return
@@ -169,6 +193,11 @@ class Simulation(NullSimulation):
         # increment the time
         self.cc_data.t += self.dt
         self.n += 1
+
+    def finalize(self):
+        if isinstance(self.cc_data, ResidentData):
+            self.cc_data.synchronize()
+        super().finalize()
 
     def dovis(self):
         """

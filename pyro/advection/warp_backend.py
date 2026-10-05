@@ -148,6 +148,11 @@ class Advection:
     def _launch(self, kernel, dim, inputs):
         wp.launch(kernel, dim=dim, inputs=inputs, device=self.device)
 
+    def fill_boundary(self):
+        """Fill ghosts without transferring the density to the host."""
+        self._launch(fill_ghosts, self.a.shape, [self.a, self.nx, self.ny, self.ng,
+                     int(self.boundaries[0] == "periodic"), int(self.boundaries[2] == "periodic")])
+
     def prepare(self, dt):
         """Fill boundary ghosts and construct slopes, states, and CTU fluxes."""
         if not math.isfinite(dt) or dt <= 0:
@@ -155,8 +160,7 @@ class Advection:
         if max(abs(self.u) * dt / self.dx, abs(self.v) * dt / self.dy) > 1 + 1e-14:
             raise ValueError("advective CFL exceeds 1")
         f = wp.float64
-        self._launch(fill_ghosts, self.a.shape, [self.a, self.nx, self.ny, self.ng,
-                     int(self.boundaries[0] == "periodic"), int(self.boundaries[2] == "periodic")])
+        self.fill_boundary()
         target_x, target_y = (self.tx, self.ty) if self.limiter == 2 else (self.sx, self.sy)
         self._launch(slopes, (self.nx + 4, self.ny + 4), [self.a, target_x, target_y, self.ng, self.limiter])
         if self.limiter == 2:

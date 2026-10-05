@@ -67,6 +67,23 @@ state. This transfer cost is included when measuring driver-managed stepping.
 The numerical core can also be measured separately with device-resident density.
 No changes to the shared mesh or driver interfaces are required.
 
+For opt-in device-resident stepping, also set ``advection.warp_resident = 1``.
+Density stays on the selected device between steps. Access through ``get_var``,
+``get_vars``, ``cc_data.data``, or mesh diagnostics synchronizes the host mirror.
+Because those NumPy arrays are mutable, host access conservatively schedules an
+upload before the next step; edits made through a freshly acquired view are
+therefore respected. Reacquire views after every device step before reading or
+editing them: retained views are refreshed only when another host access
+synchronizes the mirror. The default ``warp_resident = 0`` keeps views current
+at every step, as described above.
+
+The resident adapter is local to advection. The existing driver still controls
+timesteps, time, step counts, output, and visualization. HDF5 output synchronizes
+only when needed and does not re-upload unchanged output data; finalization also
+synchronizes. Loaded data can be installed in a resident simulation as usual.
+Changing velocity, limiter, boundaries, mesh/data, or device reconstructs the
+backend from current state. Disable resident mode before selecting NumPy.
+
 HDF5 files use the existing format and record the backend parameters. The
 ``io_pyro.read`` routine remains a data reader, not a driver restart API; loaded
 data can be installed into a configured simulation for continuation with matching
