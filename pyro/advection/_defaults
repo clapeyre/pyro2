@@ -3,6 +3,9 @@ cfl       = 0.8           ; advective CFL number
 
 
 [advection]
+backend = numpy       ; numpy (default) or optional warp backend
+warp_device = cuda:0  ; Warp device, e.g. cuda:0 or cpu
+
 u = 1.0      ; advective velocity in x-direction
 v = 1.0      ; advective velocity in y-direction
 

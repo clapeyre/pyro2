@@ -24,6 +24,9 @@ dependencies = [
   "h5py",
 ]
 
+[project.optional-dependencies]
+warp = ["warp-lang>=1.18,<2"]
+
 [project.scripts]
 "pyro_sim.py" = "pyro.pyro_sim:main"
 

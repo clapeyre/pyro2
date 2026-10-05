@@ -32,6 +32,50 @@ The parameters for this solver are:
 
 .. include:: advection_problems.inc
 
+Optional Warp backend
+---------------------
+
+The ``advection`` solver also supports NVIDIA Warp. The default
+``advection.backend = numpy`` uses the existing solver and does not import or
+require Warp. Install the optional dependency with Python 3.10 or newer:
+
+.. prompt:: bash
+
+   pip install '.[warp]'
+
+Select ``advection.backend = warp`` and ``advection.warp_device = cuda:0`` for
+CUDA execution, or ``advection.warp_device = cpu`` for Warp CPU execution.
+For example:
+
+.. prompt:: bash
+
+   pyro_sim.py advection smooth inputs.smooth advection.backend=warp advection.warp_device=cuda:0 particles.do_particles=0 vis.dovis=0
+
+This backend supports constant-velocity scalar advection on Cartesian meshes
+with periodic boundaries on all four sides, at least four cells per direction,
+and limiters 0, 1, and 2. Particles must be disabled; the smooth input file enables
+them by default. Unsupported configurations and unavailable devices raise an
+error rather than silently selecting another backend.
+
+The Warp kernels use float64 and reuse their device scratch arrays. The driver
+uploads density before each step and retrieves it afterward, preserving the
+existing ``CellCenterData2d`` behavior: retained NumPy views stay current, host
+edits affect the next step, and visualization and HDF5 output see the evolved
+state. This transfer cost is included when measuring driver-managed stepping.
+The numerical core can also be measured separately with device-resident density.
+No changes to the shared mesh or driver interfaces are required.
+
+HDF5 files use the existing format and record the backend parameters. The
+``io_pyro.read`` routine remains a data reader, not a driver restart API; loaded
+data can be installed into a configured simulation for continuation with matching
+parameters and timestep state.
+
+The optional kernel and driver tests are under ``pyro/advection/tests``. They
+skip when Warp is not installed; CUDA cases skip when no CUDA device is available.
+Set ``PYRO_REQUIRE_CUDA=1`` to require GPU validation. Docker validation and
+benchmark commands are documented in ``tools/warp/README.md``.
+
+
 ``advection_fv4`` solver
 ========================
 

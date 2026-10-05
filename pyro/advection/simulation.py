@@ -17,6 +17,16 @@ class Simulation(NullSimulation):
         conditions for the chosen problem.
         """
 
+        self._warp = None
+        if self._backend_name() == "warp":
+            if self.rp.get_param("particles.do_particles"):
+                raise ValueError("Warp advection does not support particles")
+            if self.rp.get_param("mesh.grid_type") != "Cartesian2d":
+                raise ValueError("Warp advection requires a Cartesian mesh")
+            sides = ("xlboundary", "xrboundary", "ylboundary", "yrboundary")
+            if any(self.rp.get_param("mesh." + side) != "periodic" for side in sides):
+                raise ValueError("Warp advection requires periodic boundaries on all sides")
+
         my_grid = grid_setup(self.rp, ng=4)
 
         # create the variables
@@ -34,6 +44,53 @@ class Simulation(NullSimulation):
 
         # now set the initial conditions for the problem
         self.problem_func(self.cc_data, self.rp)
+        self._advection_backend()
+
+    def _backend_name(self):
+        try:
+            backend = self.rp.get_param("advection.backend")
+        except KeyError:
+            backend = "numpy"
+        if backend not in ("numpy", "warp"):
+            raise ValueError("advection.backend must be numpy or warp")
+        if backend == "warp" and self.solver_name != "advection":
+            raise ValueError("Warp is supported only by the advection solver")
+        return backend
+
+    def _advection_backend(self):
+        if self._backend_name() == "numpy":
+            return None
+        if self.rp.get_param("particles.do_particles"):
+            raise ValueError("Warp advection does not support particles")
+        grid = self.cc_data.grid
+        if not isinstance(grid, patch.Cartesian2d) or grid.ng != 4:
+            raise ValueError("Warp advection requires a Cartesian mesh with four ghost cells")
+        bc = self.cc_data.BCs["density"]
+        if any(getattr(bc, side) != "periodic" for side in ("xlb", "xrb", "ylb", "yrb")):
+            raise ValueError("Warp advection requires periodic boundaries on all sides")
+        try:
+            device = self.rp.get_param("advection.warp_device")
+        except KeyError:
+            device = "cuda:0"
+        u = self.rp.get_param("advection.u")
+        v = self.rp.get_param("advection.v")
+        limiter = self.rp.get_param("advection.limiter")
+        key = (id(grid), grid.nx, grid.ny, grid.dx, grid.dy, u, v, limiter, device)
+        cached = getattr(self, "_warp", None)
+        if cached is None or getattr(self, "_warp_key", None) != key:
+            try:
+                # Import only when the optional backend is selected.
+                from pyro.advection.warp_backend import \
+                    PeriodicAdvection  # pylint: disable=import-outside-toplevel
+            except ModuleNotFoundError as exc:
+                if exc.name == "warp":
+                    raise ImportError("Warp advection requires the optional dependency: pip install '.[warp]'") from exc
+                raise
+            self._warp = PeriodicAdvection(self.cc_data.get_var("density"),
+                nx=grid.nx, ny=grid.ny, dx=grid.dx, dy=grid.dy,
+                u=u, v=v, limiter=limiter, device=device)
+            self._warp_key = key
+        return self._warp
 
     def method_compute_timestep(self):
         """
@@ -59,6 +116,16 @@ class Simulation(NullSimulation):
         consider the "density" variable in the CellCenterData2d object that
         is part of the Simulation.
         """
+
+        warp_backend = self._advection_backend()
+        if warp_backend is not None:
+            density = self.cc_data.get_var("density")
+            warp_backend.upload(density)
+            warp_backend.step(self.dt)
+            density[:, :] = warp_backend.numpy()
+            self.cc_data.t += self.dt
+            self.n += 1
+            return
 
         dtdx = self.dt/self.cc_data.grid.dx
         dtdy = self.dt/self.cc_data.grid.dy
