@@ -1,0 +1,9 @@
+.git
+.standalone-backup
+artifacts
+__pycache__
+**/__pycache__
+.pytest_cache
+*.egg-info
+inputs.auto
+test_outputs
