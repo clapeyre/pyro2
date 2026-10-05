@@ -11,6 +11,7 @@ from pyro import Pyro
     ({"advection.backend": "invalid"}, "advection.backend"),
     ({"advection.backend": "warp", "particles.do_particles": 1}, "particles"),
     ({"advection.backend": "warp", "mesh.xlboundary": "outflow"}, "periodic"),
+    ({"advection.backend": "warp", "mesh.xlboundary": "reflect"}, "periodic or outflow"),
     ({"advection.backend": "warp", "mesh.grid_type": "SphericalPolar"}, "Cartesian"),
 ])
 def test_reject_unsupported_configuration(tmp_path, monkeypatch, options, message):

@@ -1,7 +1,7 @@
 """Float64 CTU advection, preserving pyro2's indexing and operation order.
 
 The numerical formulas follow pyro2 (BSD-3-Clause); see LICENSE at the repository root.
-Only periodic, Cartesian, constant-velocity scalar advection is supported.
+Periodic and outflow boundaries on Cartesian, constant-velocity scalar advection are supported.
 """
 import math
 
@@ -25,11 +25,18 @@ def mc(dl: wp.float64, dr: wp.float64, dc: wp.float64):
 
 
 @wp.kernel
-def periodic(a: wp.array2d(dtype=wp.float64), nx: int, ny: int, ng: int):
+def fill_ghosts(a: wp.array2d(dtype=wp.float64), nx: int, ny: int, ng: int,
+                periodic_x: int, periodic_y: int):
     i, j = wp.tid()
     if i < ng or i >= ng + nx or j < ng or j >= ng + ny:
-        ii = (i - ng + nx * ng) % nx + ng
-        jj = (j - ng + ny * ng) % ny + ng
+        ii = wp.clamp(i, ng, ng + nx - 1)
+        jj = wp.clamp(j, ng, ng + ny - 1)
+        if periodic_x != 0:
+            ii = (i - ng + nx * ng) % nx + ng
+        if periodic_y != 0:
+            jj = (j - ng + ny * ng) % ny + ng
+        # Both indices refer to interior cells, including at corners. Ghost
+        # threads never read other ghost threads' writes in this launch.
         a[i, j] = a[ii, jj]
 
 
@@ -105,19 +112,26 @@ def update(a: wp.array2d(dtype=wp.float64), fx: wp.array2d(dtype=wp.float64),
     a[i, j] = a[i, j] + dtdx * (fx[i, j] - fx[i + 1, j]) + dtdy * (fy[i, j] - fy[i, j + 1])
 
 
-class PeriodicAdvection:
+class Advection:
     """Device-resident state and scratch arrays; no host transfers during step().
 
     Input/output use pyro's (x, y) ordering with four ghost cells per side.
     Call numpy() explicitly to synchronize and retrieve the evolved state.
     """
-    def __init__(self, density, *, nx, ny, dx, dy, u=1.0, v=1.0, limiter=2, device="cpu"):
+    def __init__(self, density, *, nx, ny, dx, dy, u=1.0, v=1.0, limiter=2, device="cpu",
+                 boundaries=("periodic", "periodic", "periodic", "periodic")):
         if limiter not in (0, 1, 2):
             raise ValueError("supported limiters: 0, 1, 2")
         if not isinstance(nx, int) or not isinstance(ny, int) or min(nx, ny) < 4:
             raise ValueError("nx and ny must be integers >= 4")
         if not all(math.isfinite(x) for x in (dx, dy, u, v)) or min(dx, dy) <= 0:
             raise ValueError("positive finite spacing and finite velocities required")
+        if len(boundaries) != 4 or any(b not in ("periodic", "outflow") for b in boundaries):
+            raise ValueError("four periodic or outflow boundaries required (xl, xr, yl, yr)")
+        for lo, hi in (boundaries[:2], boundaries[2:]):
+            if (lo == "periodic") != (hi == "periodic"):
+                raise ValueError("periodic boundaries must be paired in each direction")
+        self.boundaries = tuple(boundaries)
         self.ng = 4
         self.nx, self.ny = nx, ny
         self.dx, self.dy, self.u, self.v = dx, dy, u, v
@@ -135,13 +149,14 @@ class PeriodicAdvection:
         wp.launch(kernel, dim=dim, inputs=inputs, device=self.device)
 
     def prepare(self, dt):
-        """Fill periodic ghosts and construct slopes, states, and CTU fluxes."""
+        """Fill boundary ghosts and construct slopes, states, and CTU fluxes."""
         if not math.isfinite(dt) or dt <= 0:
             raise ValueError("dt must be positive and finite")
         if max(abs(self.u) * dt / self.dx, abs(self.v) * dt / self.dy) > 1 + 1e-14:
             raise ValueError("advective CFL exceeds 1")
         f = wp.float64
-        self._launch(periodic, self.a.shape, [self.a, self.nx, self.ny, self.ng])
+        self._launch(fill_ghosts, self.a.shape, [self.a, self.nx, self.ny, self.ng,
+                     int(self.boundaries[0] == "periodic"), int(self.boundaries[2] == "periodic")])
         target_x, target_y = (self.tx, self.ty) if self.limiter == 2 else (self.sx, self.sy)
         self._launch(slopes, (self.nx + 4, self.ny + 4), [self.a, target_x, target_y, self.ng, self.limiter])
         if self.limiter == 2:

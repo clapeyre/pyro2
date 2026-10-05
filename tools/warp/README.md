@@ -17,7 +17,8 @@ written to the local `artifacts/` directory.
 The optional package extra is `pip install '.[warp]'`. Default NumPy execution
 works without Warp. The backend is configured through the existing runtime
 parameters `advection.backend=warp` and `advection.warp_device=cuda:0`; particles
-must be disabled and all boundaries periodic.
+must be disabled. Boundaries may be periodic or outflow, with periodic sides
+paired along each axis.
 
 ## Benchmark scopes
 

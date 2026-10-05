@@ -24,8 +24,8 @@ class Simulation(NullSimulation):
             if self.rp.get_param("mesh.grid_type") != "Cartesian2d":
                 raise ValueError("Warp advection requires a Cartesian mesh")
             sides = ("xlboundary", "xrboundary", "ylboundary", "yrboundary")
-            if any(self.rp.get_param("mesh." + side) != "periodic" for side in sides):
-                raise ValueError("Warp advection requires periodic boundaries on all sides")
+            boundaries = tuple(self.rp.get_param("mesh." + side) for side in sides)
+            self._validate_warp_boundaries(boundaries)
 
         my_grid = grid_setup(self.rp, ng=4)
 
@@ -57,6 +57,14 @@ class Simulation(NullSimulation):
             raise ValueError("Warp is supported only by the advection solver")
         return backend
 
+    @staticmethod
+    def _validate_warp_boundaries(boundaries):
+        if any(b not in ("periodic", "outflow") for b in boundaries):
+            raise ValueError("Warp advection supports only periodic or outflow boundaries")
+        for lo, hi in (boundaries[:2], boundaries[2:]):
+            if (lo == "periodic") != (hi == "periodic"):
+                raise ValueError("periodic boundaries must be paired in each direction")
+
     def _advection_backend(self):
         if self._backend_name() == "numpy":
             return None
@@ -66,8 +74,10 @@ class Simulation(NullSimulation):
         if not isinstance(grid, patch.Cartesian2d) or grid.ng != 4:
             raise ValueError("Warp advection requires a Cartesian mesh with four ghost cells")
         bc = self.cc_data.BCs["density"]
-        if any(getattr(bc, side) != "periodic" for side in ("xlb", "xrb", "ylb", "yrb")):
-            raise ValueError("Warp advection requires periodic boundaries on all sides")
+        boundaries = tuple(getattr(bc, side) for side in ("xlb", "xrb", "ylb", "yrb"))
+        self._validate_warp_boundaries(boundaries)
+        if any(getattr(bc, side + "_value") is not None for side in ("xl", "xr", "yl", "yr")):
+            raise ValueError("Warp advection does not support boundary value callbacks")
         try:
             device = self.rp.get_param("advection.warp_device")
         except KeyError:
@@ -75,20 +85,20 @@ class Simulation(NullSimulation):
         u = self.rp.get_param("advection.u")
         v = self.rp.get_param("advection.v")
         limiter = self.rp.get_param("advection.limiter")
-        key = (id(grid), grid.nx, grid.ny, grid.dx, grid.dy, u, v, limiter, device)
+        key = (id(grid), grid.nx, grid.ny, grid.dx, grid.dy, u, v, limiter, device, boundaries)
         cached = getattr(self, "_warp", None)
         if cached is None or getattr(self, "_warp_key", None) != key:
             try:
                 # Import only when the optional backend is selected.
                 from pyro.advection.warp_backend import \
-                    PeriodicAdvection  # pylint: disable=import-outside-toplevel
+                    Advection  # pylint: disable=import-outside-toplevel
             except ModuleNotFoundError as exc:
                 if exc.name == "warp":
                     raise ImportError("Warp advection requires the optional dependency: pip install '.[warp]'") from exc
                 raise
-            self._warp = PeriodicAdvection(self.cc_data.get_var("density"),
+            self._warp = Advection(self.cc_data.get_var("density"),
                 nx=grid.nx, ny=grid.ny, dx=grid.dx, dy=grid.dy,
-                u=u, v=v, limiter=limiter, device=device)
+                u=u, v=v, limiter=limiter, device=device, boundaries=boundaries)
             self._warp_key = key
         return self._warp
 

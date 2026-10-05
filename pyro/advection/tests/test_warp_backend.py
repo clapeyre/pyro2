@@ -16,7 +16,7 @@ import pyro
 from pyro import Pyro
 from pyro.advection.advective_fluxes import unsplit_fluxes
 from pyro.advection.interface import linear_interface
-from pyro.advection.warp_backend import PeriodicAdvection
+from pyro.advection.warp_backend import Advection
 from pyro.mesh import reconstruction
 from pyro.util import io_pyro
 
@@ -25,12 +25,14 @@ pytestmark = pytest.mark.usefixtures("isolated_outputs")
 VELOCITIES = list(itertools.product([-0.7, 0.0, 0.9], [-0.6, 0.0, 0.8]))
 
 
-def reference(nx=12, ny=9, u=0.9, v=0.8, limiter=2, profile="random"):
+def reference(nx=12, ny=9, u=0.9, v=0.8, limiter=2, profile="random",
+              boundaries=("periodic", "periodic", "periodic", "periodic")):
     p = Pyro("advection")
     p.initialize_problem("smooth", inputs_dict={
         "mesh.nx": nx, "mesh.ny": ny, "mesh.xmax": 1.3, "mesh.ymax": 0.8,
         "particles.do_particles": 0, "advection.u": u, "advection.v": v,
-        "advection.limiter": limiter, "io.force_final_output": 0})
+        "advection.limiter": limiter, "io.force_final_output": 0,
+        **{f"mesh.{side}boundary": b for side, b in zip(("xl", "xr", "yl", "yr"), boundaries)}})
     s = p.sim
     a = s.cc_data.get_var("density")
     g = s.cc_data.grid
@@ -48,9 +50,10 @@ def reference(nx=12, ny=9, u=0.9, v=0.8, limiter=2, profile="random"):
 
 def port(s, device):
     g = s.cc_data.grid
-    return PeriodicAdvection(s.cc_data.get_var("density"), nx=g.nx, ny=g.ny,
+    return Advection(s.cc_data.get_var("density"), nx=g.nx, ny=g.ny,
         dx=g.dx, dy=g.dy, u=s.rp.get_param("advection.u"),
-        v=s.rp.get_param("advection.v"), limiter=s.rp.get_param("advection.limiter"), device=device)
+        v=s.rp.get_param("advection.v"), limiter=s.rp.get_param("advection.limiter"), device=device,
+        boundaries=tuple(getattr(s.cc_data.BCs["density"], side) for side in ("xlb", "xrb", "ylb", "yrb")))
 
 
 def timestep(s):
@@ -131,12 +134,12 @@ def test_invalid_configuration(kwargs):
     params = {"nx": 8, "ny": 8, "dx": 0.1, "dy": 0.1}
     params.update(kwargs)
     with pytest.raises(ValueError):
-        PeriodicAdvection(np.ones((16, 16)), **params)
+        Advection(np.ones((16, 16)), **params)
 
 
 @pytest.mark.parametrize("dt", [0, -1, float("nan"), 2])
 def test_invalid_step(dt):
-    w = PeriodicAdvection(np.ones((16, 16)), nx=8, ny=8, dx=0.1, dy=0.1)
+    w = Advection(np.ones((16, 16)), nx=8, ny=8, dx=0.1, dy=0.1)
     with pytest.raises(ValueError):
         w.step(dt)
 
@@ -170,7 +173,7 @@ def test_poisoned_periodic_ghosts(device):
     density[-4:, :] = -999
     density[:, :4] = -999
     density[:, -4:] = -999
-    w = PeriodicAdvection(density, nx=g.nx, ny=g.ny, dx=g.dx, dy=g.dy, device=device)
+    w = Advection(density, nx=g.nx, ny=g.ny, dx=g.dx, dy=g.dy, device=device)
     w.prepare(0.01)
     assert_allclose(w.a.numpy(), s.cc_data.get_var("density"), rtol=0, atol=0)
 
@@ -186,3 +189,69 @@ def test_mc_axis_advection_bounds(device):
     result = w.numpy()[4:-4, 4:-4]
     assert result.min() >= lo - 1e-14
     assert result.max() <= hi + 1e-14
+
+
+OUTFLOW_BOUNDARIES = [
+    ("outflow", "outflow", "outflow", "outflow"),
+    ("periodic", "periodic", "outflow", "outflow"),
+    ("outflow", "outflow", "periodic", "periodic"),
+]
+
+
+@pytest.mark.parametrize("boundaries", OUTFLOW_BOUNDARIES)
+@pytest.mark.parametrize("limiter", [0, 1, 2])
+@pytest.mark.parametrize("u,v", VELOCITIES)
+@pytest.mark.parametrize("profile", ["random", "discontinuous"])
+def test_outflow_evolution_and_flux_balance(device, boundaries, limiter, u, v, profile):
+    s = reference(nx=5, ny=9, u=u, v=v, limiter=limiter,
+                  profile=profile, boundaries=boundaries)
+    w = port(s, device)
+    g = s.cc_data.grid
+    dt = timestep(s)
+    for _ in range(30):
+        s.cc_data.fill_BC_all()
+        w.prepare(dt)
+        # Includes every ghost layer and corner, as well as the interior.
+        assert_allclose(w.a.numpy(), s.cc_data.get_var("density"), rtol=2e-13, atol=2e-13)
+        fx, fy = unsplit_fluxes(s.cc_data, s.rp, dt, "density", linear_interface)
+        assert_allclose(w.fx.numpy(), fx, rtol=2e-13, atol=2e-13)
+        assert_allclose(w.fy.numpy(), fy, rtol=2e-13, atol=2e-13)
+        initial_mass = w.numpy()[4:-4, 4:-4].sum() * g.dx * g.dy
+        # Open boundaries need a flux balance, rather than conserved mass.
+        mass_change = dt * g.dy * (fx[g.ilo, g.jlo:g.jhi+1].sum() - fx[g.ihi+1, g.jlo:g.jhi+1].sum())
+        mass_change += dt * g.dx * (fy[g.ilo:g.ihi+1, g.jlo].sum() - fy[g.ilo:g.ihi+1, g.jhi+1].sum())
+        w.step(dt)
+        s.dt = dt
+        s.evolve()
+        result = w.numpy()[4:-4, 4:-4]
+        assert_allclose(result, s.cc_data.get_var("density").v(), rtol=2e-13, atol=2e-13)
+        assert_allclose(result.sum() * g.dx * g.dy, initial_mass + mass_change, rtol=3e-14, atol=3e-14)
+
+
+@pytest.mark.parametrize("boundaries", OUTFLOW_BOUNDARIES)
+def test_outflow_poisoned_ghosts_and_constant(device, boundaries):
+    s = reference(nx=4, ny=5, profile="random", boundaries=boundaries)
+    w = port(s, device)
+    density = np.array(s.cc_data.get_var("density"))
+    density[:4, :] = -999
+    density[-4:, :] = -999
+    density[:, :4] = -999
+    density[:, -4:] = -999
+    w.upload(density)
+    w.prepare(0.01)
+    assert_allclose(w.numpy(), s.cc_data.get_var("density"), rtol=0, atol=0)
+    w.upload(np.full(density.shape, 1.25))
+    for _ in range(10):
+        w.step(0.01)
+    assert_allclose(w.numpy(), 1.25, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("boundaries", [
+    ("periodic", "outflow", "outflow", "outflow"),
+    ("outflow", "outflow", "outflow", "periodic"),
+    ("reflect-even", "reflect-even", "outflow", "outflow"),
+    ("outflow",),
+])
+def test_invalid_boundaries(boundaries):
+    with pytest.raises(ValueError, match="boundar"):
+        Advection(np.ones((16, 16)), nx=8, ny=8, dx=0.1, dy=0.1, boundaries=boundaries)

@@ -102,3 +102,53 @@ def test_run_sim_final_output(device):
     assert loaded.n == p.sim.n
     assert loaded.cc_data.t == p.sim.cc_data.t
     assert_allclose(loaded.cc_data.get_var("density").v(), p.sim.cc_data.get_var("density").v(), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("periodic_axis", [None, "x", "y"])
+@pytest.mark.parametrize("limiter", [0, 1, 2])
+def test_outflow_driver_and_boundary_changes(device, periodic_axis, limiter):
+    settings = {f"mesh.{axis}{side}boundary": "periodic" if axis == periodic_axis else "outflow"
+                for axis in ("x", "y") for side in ("l", "r")}
+    settings.update({"advection.limiter": limiter, "advection.u": -0.6,
+                     "advection.v": 0.8, "driver.fix_dt": 0.01})
+    reference = simulation("numpy", device, **settings)
+    actual = simulation("warp", device, **settings)
+    retained = actual.sim.cc_data.get_var("density")
+    original_backend = actual.sim._warp  # pylint: disable=protected-access
+    resumed = None
+    for n in range(10):
+        if n == 5:
+            # Boundary metadata can change without replacing the mesh object.
+            for p in (reference, actual, resumed):
+                bc = p.sim.cc_data.BCs["density"]
+                bc.xlb = bc.xrb = bc.ylb = bc.yrb = "periodic"
+                p.sim.cc_data.get_var("density").v()[1:3, 2:4] = 1.7
+        reference.single_step()
+        actual.single_step()
+        if resumed is not None:
+            resumed.single_step()
+            assert_allclose(resumed.sim.cc_data.get_var("density"), retained, rtol=0, atol=0)
+        assert_allclose(retained, reference.sim.cc_data.get_var("density"), rtol=2e-13, atol=2e-13)
+        assert actual.sim.n == reference.sim.n
+        assert actual.sim.cc_data.t == reference.sim.cc_data.t
+        if n == 4:
+            actual.sim.write("outflow-continuation")
+            loaded = io_pyro.read("outflow-continuation")
+            # The HDF5 format stores interior cells; ghosts are filled on use.
+            assert_allclose(loaded.cc_data.get_var("density").v(), retained.v(), rtol=0, atol=0)
+            assert str(loaded.cc_data.BCs["density"]) == str(actual.sim.cc_data.BCs["density"])
+            resumed = simulation("warp", device, **settings)
+            resumed.sim.cc_data = loaded.cc_data
+            resumed.sim.n = loaded.n
+    assert actual.sim._warp is not original_backend  # pylint: disable=protected-access
+    assert resumed.sim.n == actual.sim.n
+    assert resumed.sim.cc_data.t == actual.sim.cc_data.t
+
+
+@pytest.mark.parametrize("side", ["xl", "xr", "yl", "yr"])
+def test_reject_boundary_value_callbacks(device, side):
+    p = simulation("warp", device, **{f"mesh.{axis}{edge}boundary": "outflow"
+                   for axis in ("x", "y") for edge in ("l", "r")})
+    setattr(p.sim.cc_data.BCs["density"], side + "_value", 1.0)
+    with pytest.raises(ValueError, match="boundary value callbacks"):
+        p.sim.evolve()

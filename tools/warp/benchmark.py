@@ -23,7 +23,7 @@ import warp as wp
 from numpy.testing import assert_allclose
 
 from pyro import Pyro
-from pyro.advection.warp_backend import PeriodicAdvection
+from pyro.advection.warp_backend import Advection
 
 
 def summary(samples):
@@ -92,7 +92,7 @@ def benchmark_size(n, args):
             def result_array(host_density=host_density):
                 return host_density.v()
         else:
-            w = PeriodicAdvection(initial, nx=n, ny=n, dx=g.dx, dy=g.dy,
+            w = Advection(initial, nx=n, ny=n, dx=g.dx, dy=g.dy,
                                   limiter=args.limiter, device=device_name)
             snapshot = wp.array(initial, dtype=wp.float64, device=device_name)
 

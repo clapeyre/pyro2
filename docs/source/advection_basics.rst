@@ -52,8 +52,10 @@ For example:
    pyro_sim.py advection smooth inputs.smooth advection.backend=warp advection.warp_device=cuda:0 particles.do_particles=0 vis.dovis=0
 
 This backend supports constant-velocity scalar advection on Cartesian meshes
-with periodic boundaries on all four sides, at least four cells per direction,
-and limiters 0, 1, and 2. Particles must be disabled; the smooth input file enables
+with periodic or outflow boundaries, at least four cells per direction,
+and limiters 0, 1, and 2. Periodic boundaries must be paired along each axis.
+Outflow boundaries copy the nearest interior cell into all four ghost layers;
+a mesh can use outflow along one axis and periodic boundaries along the other. Particles must be disabled; the smooth input file enables
 them by default. Unsupported configurations and unavailable devices raise an
 error rather than silently selecting another backend.
 
